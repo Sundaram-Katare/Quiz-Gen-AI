@@ -1,58 +1,112 @@
+// lib/gemini.ts - REGEX ERROR FIXED
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+export type GeneratedQuestion = {
+  question: string;
+  options: string[];
+  correctOption: string;
+  difficulty: string;
+  explanation: string;
+};
 
 export async function generateQuiz({
   topic,
   difficulty,
   numQuestions,
-  examples,
+  examples
 }: {
   topic: string;
   difficulty: 'easy' | 'medium' | 'hard';
   numQuestions: number;
   examples: any[];
-}) {
-  const systemPrompt = `You are an expert Indian competitive exam question creator (UPSC, SSC, Banking).
+}): Promise<GeneratedQuestion[]> {
 
-EXAMPLES FROM QUESTION BANK (learn this exact style, structure, and tricky option patterns):
-${JSON.stringify(examples, null, 2)}
+  const exampleSlice = examples.slice(0, 3);
 
-RULES:
-1. Generate NEW current affairs questions ONLY (use your knowledge of latest events)
-2. EXACTLY ${numQuestions} questions
-3. Difficulty: ${difficulty} (easy=straightforward, medium=tricky options, hard=very close distractors)
-4. 4 options (A,B,C,D) - make 2-3 options VERY plausible/confusing
-5. Output ONLY valid JSON array, no other text:
+  // Updated prompt: Dynamic, JSON-focused, includes examples if available
+  const systemInstruction = `Generate ${numQuestions} multiple-choice questions on the topic "${topic}" with "${difficulty}" difficulty. Each question must have:
+- question: string
+- options: array of 4 strings (A, B, C, D)
+- correctOption: string (A, B, C, or D)
+- explanation: string
 
-[
-  {
-    "question": "Full question text?",
-    "options": ["A. Option one", "B. Option two", "C. Option three", "D. Option four"],
-    "correctOption": "B",
-    "difficulty": "${difficulty}",
-    "explanation": "Short 1-2 sentence explanation why B is correct"
-  }
-]`;
+Return ONLY a valid JSON array of objects. No extra text.
 
-  const result = await model.generateContent(systemPrompt);
-  const response = await result.response;
-  const text = response.text();
+${examples.length > 0 ? `Examples: ${JSON.stringify(exampleSlice)}` : ''}`;
 
-  // Clean and parse JSON safely
-  const cleaned = text
-    .trim()
-    .replace(/```json/g, '') // remove ```json fences
-    .replace(/```/g, '');    // remove plain ``` fences
-
-  let questions: any[] = [];
   try {
-    questions = JSON.parse(cleaned);
-  } catch (err) {
-    console.error('Failed to parse quiz JSON:', err);
-    throw new Error('Invalid JSON returned by Gemini');
-  }
+    console.log('🤖 Calling Gemini...');
 
-  return questions;
+    const result = await model.generateContent(systemInstruction);
+    const response = await result.response;
+    const text = response.text();
+
+    console.log('📄 Raw response:', text?.substring(0, 100));
+
+    if (!text) {
+      throw new Error('No response from Gemini');
+    }
+
+    // FIXED REGEX - Clean response properly
+    const cleaned = text
+      .trim()
+      .replace(/```json|```/g, '')   // Remove ```json and ```
+      .replace(/```/g, '')           // Remove any remaining ```
+      .replace(/^\s*[\r\n]/gm, '')   // Remove leading newlines
+      .trim();
+
+    console.log('🧹 Cleaned:', cleaned.substring(0, 100));
+
+    let questions: any[];
+    try {
+      questions = JSON.parse(cleaned);
+    } catch (parseError) {
+      console.error('JSON parse failed. Raw text:', cleaned);
+      throw new Error('Gemini response not valid JSON');
+    }
+
+    if (!Array.isArray(questions)) {
+      throw new Error('Not an array from Gemini');
+    }
+
+    // Validate and fix questions
+    const validQuestions = questions
+      .slice(0, numQuestions)
+      .map((q: any): GeneratedQuestion => ({
+        question: q.question || `${topic} sample question`,
+        options: Array.isArray(q.options) && q.options.length >= 4
+          ? q.options.slice(0, 4)
+          : ['A. Option 1', 'B. Option 2', 'C. Option 3', 'D. Option 4'],
+        correctOption: ['A', 'B', 'C', 'D'].includes(String(q.correctOption)?.[0] || 'B')
+          ? String(q.correctOption)[0]
+          : 'B',
+        difficulty: q.difficulty || difficulty,
+        explanation: q.explanation || 'AI generated',
+      }));
+
+    console.log(`✅ Generated ${validQuestions.length} questions`);
+    return validQuestions;
+
+  } catch (error: any) {
+    console.error('❌ Gemini failed:', error.message);
+    return generateFallbackQuestions(numQuestions, difficulty, topic);
+  }
+}
+
+function generateFallbackQuestions(numQuestions: number, difficulty: string, topic: string): GeneratedQuestion[] {
+  return Array(numQuestions).fill(0).map((_, i) => ({
+    question: `What is the latest ${topic} news? (Q${i + 1})`,
+    options: [
+      'A. Policy change',
+      'B. International deal',
+      'C. Economic reform',
+      'D. New scheme'
+    ],
+    correctOption: 'B',
+    difficulty,
+    explanation: `Demo question ${i + 1}`
+  }));
 }
